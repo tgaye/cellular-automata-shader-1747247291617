@@ -1,0 +1,652 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cellular Automata Shader</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: center;
+            position: relative;
+        }
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            color: white;
+            max-width: 250px;
+            z-index: 100;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        button {
+            background: #444;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            margin: 2px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #666;
+        }
+        .value-display {
+            font-size: 12px;
+            color: #aaa;
+            text-align: right;
+        }
+        #toggle-ui {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: rgba(0, 0, 0, 0.5);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 25px;
+            height: 25px;
+            cursor: pointer;
+            z-index: 101;
+        }
+        .preset-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+    </style>
+
+<base target="_self">
+
+
+    </head><body><div id="canvas-container"></div>
+    <div id="ui-container">
+        <button id="toggle-ui">×</button>
+        <h3>Cellular Automata</h3>
+        <div class="control-group">
+            <label for="speed">Simulation Speed</label>
+            <input type="range" id="speed" min="0" max="2" step="0.1" value="1">
+            <div class="value-display" id="speed-value">1.0</div>
+        </div>
+        <div class="control-group">
+            <label for="color-speed">Color Evolution</label>
+            <input type="range" id="color-speed" min="0" max="1" step="0.01" value="0.3">
+            <div class="value-display" id="color-speed-value">0.3</div>
+        </div>
+        <div class="control-group">
+            <label for="brush-size">Brush Size</label>
+            <input type="range" id="brush-size" min="0.01" max="0.2" step="0.01" value="0.05">
+            <div class="value-display" id="brush-size-value">0.05</div>
+        </div>
+        <div class="control-group">
+            <label>Preset Patterns</label>
+            <div class="preset-buttons">
+                <button id="preset-random">Random</button>
+                <button id="preset-glider">Glider</button>
+                <button id="preset-pulsar">Pulsar</button>
+                <button id="preset-clear">Clear</button>
+            </div>
+        </div>
+        <div class="control-group">
+            <label>Rules</label>
+            <div class="preset-buttons">
+                <button id="rule-life">Game of Life</button>
+                <button id="rule-highlife">HighLife</button>
+                <button id="rule-seeds">Seeds</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script>
+        // Check for WebGL support
+        if (!WebGLRenderingContext) {
+            const container = document.getElementById('canvas-container');
+            container.innerHTML = '<div style="color: white; text-align: center; padding: 20px;">Your browser does not support WebGL. Please try with a modern browser.</div>';
+            throw new Error('WebGL not supported');
+        }
+
+        // Main variables
+        let renderer, scene, camera, material;
+        let mouse = new THREE.Vector2(0, 0);
+        let prevMouse = new THREE.Vector2(0, 0);
+        let isMouseDown = false;
+        let currentTextureIndex = 0;
+        let renderTargets = [];
+        let clock = new THREE.Clock();
+        let params = {
+            speed: 1.0,
+            colorSpeed: 0.3,
+            brushSize: 0.05,
+            rule: 'life' // 'life', 'highlife', 'seeds'
+        };
+
+        // Initialize Three.js
+        function init() {
+            // Create renderer
+            const container = document.getElementById('canvas-container');
+            const width = Math.min(window.innerWidth, 1200);
+            const height = width * (9/16);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // Create scene and camera
+            scene = new THREE.Scene();
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+            // Create render targets for ping-pong rendering
+            const rtParams = {
+                minFilter: THREE.NearestFilter,
+                magFilter: THREE.NearestFilter,
+                format: THREE.RGBAFormat,
+                type: THREE.FloatType
+            };
+
+            for (let i = 0; i < 2; i++) {
+                renderTargets.push(new THREE.WebGLRenderTarget(width, height, rtParams));
+            }
+
+            // Create full-screen quad
+            const geometry = new THREE.PlaneGeometry(2, 2);
+
+            // Shader material
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    u_texture: { value: renderTargets[0].texture },
+                    u_resolution: { value: new THREE.Vector2(width, height) },
+                    u_mouse: { value: new THREE.Vector2(0, 0) },
+                    u_prevMouse: { value: new THREE.Vector2(0, 0) },
+                    u_mouseDown: { value: 0 },
+                    u_time: { value: 0 },
+                    u_deltaTime: { value: 0 },
+                    u_speed: { value: params.speed },
+                    u_colorSpeed: { value: params.colorSpeed },
+                    u_brushSize: { value: params.brushSize },
+                    u_rule: { value: 0 } // 0 = life, 1 = highlife, 2 = seeds
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                precision highp float;
+                uniform sampler2D u_texture;
+                uniform vec2 u_resolution;
+                uniform vec2 u_mouse;
+                uniform vec2 u_prevMouse;
+                uniform float u_mouseDown;
+                uniform float u_time;
+                uniform float u_deltaTime;
+                uniform float u_speed;
+                uniform float u_colorSpeed;
+                uniform float u_brushSize;
+                uniform int u_rule;
+                
+                varying vec2 vUv;
+                
+                // Random function
+                float rand(vec2 co) {
+                    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                }
+                
+                // Cellular automata rules
+                vec4 applyRules(vec4 current, vec4[9] neighbors) {
+                    int alive = 0;
+                    for(int i = 0; i < 9; i++) {
+                        if(i == 4) continue; // Skip center
+                        if(neighbors[i].a > 0.5) alive++;
+                    }
+                    
+                    // Game of Life rules
+                    if(u_rule == 0) {
+                        if(current.a > 0.5) {
+                            // Survival rules
+                            if(alive == 2 || alive == 3) {
+                                return vec4(current.rgb, 1.0);
+                            } else {
+                                return vec4(0.0, 0.0, 0.0, 0.0);
+                            }
+                        } else {
+                            // Birth rules
+                            if(alive == 3) {
+                                // Blend colors from neighbors
+                                vec3 color = vec3(0.0);
+                                int count = 0;
+                                for(int i = 0; i < 9; i++) {
+                                    if(i == 4) continue;
+                                    if(neighbors[i].a > 0.5) {
+                                        color += neighbors[i].rgb;
+                                        count++;
+                                    }
+                                }
+                                if(count > 0) color /= float(count);
+                                return vec4(mix(color, vec3(0.5 + 0.5 * sin(u_time * 0.5), 0.5 + 0.5 * sin(u_time * 0.7), 0.5 + 0.5 * sin(u_time * 0.9)), u_colorSpeed), 1.0);
+                            } else {
+                                return vec4(0.0, 0.0, 0.0, 0.0);
+                            }
+                        }
+                    }
+                    // HighLife rules (B36/S23)
+                    else if(u_rule == 1) {
+                        if(current.a > 0.5) {
+                            // Survival rules
+                            if(alive == 2 || alive == 3) {
+                                return vec4(current.rgb, 1.0);
+                            } else {
+                                return vec4(0.0, 0.0, 0.0, 0.0);
+                            }
+                        } else {
+                            // Birth rules
+                            if(alive == 3 || alive == 6) {
+                                // Blend colors from neighbors
+                                vec3 color = vec3(0.0);
+                                int count = 0;
+                                for(int i = 0; i < 9; i++) {
+                                    if(i == 4) continue;
+                                    if(neighbors[i].a > 0.5) {
+                                        color += neighbors[i].rgb;
+                                        count++;
+                                    }
+                                }
+                                if(count > 0) color /= float(count);
+                                return vec4(mix(color, vec3(0.5 + 0.5 * sin(u_time * 0.3), 0.5 + 0.5 * sin(u_time * 0.7), 0.5 + 0.5 * sin(u_time * 0.9)), u_colorSpeed), 1.0);
+                            } else {
+                                return vec4(0.0, 0.0, 0.0, 0.0);
+                            }
+                        }
+                    }
+                    // Seeds rules (B2/S)
+                    else if(u_rule == 2) {
+                        if(current.a > 0.5) {
+                            // Always die
+                            return vec4(0.0, 0.0, 0.0, 0.0);
+                        } else {
+                            // Birth rules
+                            if(alive == 2) {
+                                return vec4(vec3(0.5 + 0.5 * sin(u_time * 0.2), 0.5 + 0.5 * sin(u_time * 0.4), 0.5 + 0.5 * sin(u_time * 0.6)), 1.0);
+                            } else {
+                                return vec4(0.0, 0.0, 0.0, 0.0);
+                            }
+                        }
+                    }
+                    
+                    return current;
+                }
+                
+                void main() {
+                    vec2 uv = vUv;
+                    vec2 pixelSize = 1.0 / u_resolution;
+                    
+                    // Get current cell state
+                    vec4 current = texture2D(u_texture, uv);
+                    
+                    // Get neighbor states
+                    vec4 neighbors[9];
+                    int index = 0;
+                    for(int y = -1; y <= 1; y++) {
+                        for(int x = -1; x <= 1; x++) {
+                            vec2 offset = vec2(float(x), float(y)) * pixelSize;
+                            neighbors[index] = texture2D(u_texture, uv + offset);
+                            index++;
+                        }
+                    }
+                    
+                    // Apply rules
+                    vec4 newState = applyRules(current, neighbors);
+                    
+                    // Mouse interaction
+                    if(u_mouseDown > 0.5) {
+                        float dist = distance(uv, u_mouse);
+                        float prevDist = distance(uv, u_prevMouse);
+                        
+                        // Draw with brush
+                        if(dist < u_brushSize || prevDist < u_brushSize) {
+                            float strength = smoothstep(u_brushSize, 0.0, min(dist, prevDist));
+                            newState = mix(newState, vec4(0.5 + 0.5 * sin(u_time * 0.1), 0.5 + 0.5 * sin(u_time * 0.3), 0.5 + 0.5 * sin(u_time * 0.5), 1.0), strength);
+                        }
+                    }
+                    
+                    gl_FragColor = newState;
+                }
+            `
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+
+            // Initialize texture with random pattern
+            initializeTexture();
+
+            // Event listeners
+            window.addEventListener('resize', onWindowResize);
+            renderer.domElement.addEventListener('mousemove', onMouseMove);
+            renderer.domElement.addEventListener('mousedown', onMouseDown);
+            renderer.domElement.addEventListener('mouseup', onMouseUp);
+            renderer.domElement.addEventListener('touchmove', onTouchMove, { passive: false });
+            renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: false });
+            renderer.domElement.addEventListener('touchend', onTouchEnd, { passive: false });
+
+            // UI controls
+            document.getElementById('speed').addEventListener('input', updateSpeed);
+            document.getElementById('color-speed').addEventListener('input', updateColorSpeed);
+            document.getElementById('brush-size').addEventListener('input', updateBrushSize);
+            document.getElementById('preset-random').addEventListener('click', randomPattern);
+            document.getElementById('preset-glider').addEventListener('click', gliderPattern);
+            document.getElementById('preset-pulsar').addEventListener('click', pulsarPattern);
+            document.getElementById('preset-clear').addEventListener('click', clearPattern);
+            document.getElementById('rule-life').addEventListener('click', () => setRule('life'));
+            document.getElementById('rule-highlife').addEventListener('click', () => setRule('highlife'));
+            document.getElementById('rule-seeds').addEventListener('click', () => setRule('seeds'));
+            document.getElementById('toggle-ui').addEventListener('click', toggleUI);
+
+            // Start animation loop
+            animate();
+        }
+
+        // Initialize texture with random pattern
+        function initializeTexture() {
+            const width = renderer.domElement.width;
+            const height = renderer.domElement.height;
+            const size = width * height * 4;
+            const data = new Float32Array(size);
+
+            for (let i = 0; i < size; i += 4) {
+                // Start with mostly empty space and some random live cells
+                if (Math.random() < 0.01) {
+                    data[i] = Math.random(); // R
+                    data[i+1] = Math.random(); // G
+                    data[i+2] = Math.random(); // B
+                    data[i+3] = 1.0; // A (alive)
+                } else {
+                    data[i] = 0.0;
+                    data[i+1] = 0.0;
+                    data[i+2] = 0.0;
+                    data[i+3] = 0.0;
+                }
+            }
+
+            // Update both render targets
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].texture.image.data = data;
+                renderTargets[i].texture.needsUpdate = true;
+            }
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const deltaTime = clock.getDelta();
+            material.uniforms.u_time.value += deltaTime;
+            material.uniforms.u_deltaTime.value = deltaTime;
+
+            // Ping-pong rendering
+            currentTextureIndex = 1 - currentTextureIndex;
+            material.uniforms.u_texture.value = renderTargets[currentTextureIndex].texture;
+
+            // Render to the other texture
+            renderer.setRenderTarget(renderTargets[1 - currentTextureIndex]);
+            renderer.render(scene, camera);
+            renderer.setRenderTarget(null);
+
+            // Render to screen
+            renderer.render(scene, camera);
+        }
+
+        // Window resize handler
+        function onWindowResize() {
+            const container = document.getElementById('canvas-container');
+            const width = Math.min(window.innerWidth, 1200);
+            const height = width * (9/16);
+
+            renderer.setSize(width, height);
+            material.uniforms.u_resolution.value.set(width, height);
+
+            // Resize render targets
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].setSize(width, height);
+            }
+
+            // Reinitialize texture
+            initializeTexture();
+        }
+
+        // Mouse/touch handlers
+        function onMouseMove(event) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = (event.clientX - rect.left) / rect.width;
+            mouse.y = 1.0 - (event.clientY - rect.top) / rect.height;
+            material.uniforms.u_prevMouse.value.copy(material.uniforms.u_mouse.value);
+            material.uniforms.u_mouse.value.copy(mouse);
+        }
+
+        function onMouseDown(event) {
+            isMouseDown = true;
+            material.uniforms.u_mouseDown.value = 1.0;
+            onMouseMove(event);
+        }
+
+        function onMouseUp() {
+            isMouseDown = false;
+            material.uniforms.u_mouseDown.value = 0.0;
+        }
+
+        function onTouchMove(event) {
+            event.preventDefault();
+            const touch = event.touches[0];
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = (touch.clientX - rect.left) / rect.width;
+            mouse.y = 1.0 - (touch.clientY - rect.top) / rect.height;
+            material.uniforms.u_prevMouse.value.copy(material.uniforms.u_mouse.value);
+            material.uniforms.u_mouse.value.copy(mouse);
+        }
+
+        function onTouchStart(event) {
+            event.preventDefault();
+            isMouseDown = true;
+            material.uniforms.u_mouseDown.value = 1.0;
+            onTouchMove(event);
+        }
+
+        function onTouchEnd() {
+            isMouseDown = false;
+            material.uniforms.u_mouseDown.value = 0.0;
+        }
+
+        // UI control handlers
+        function updateSpeed() {
+            params.speed = parseFloat(this.value);
+            material.uniforms.u_speed.value = params.speed;
+            document.getElementById('speed-value').textContent = params.speed.toFixed(1);
+        }
+
+        function updateColorSpeed() {
+            params.colorSpeed = parseFloat(this.value);
+            material.uniforms.u_colorSpeed.value = params.colorSpeed;
+            document.getElementById('color-speed-value').textContent = params.colorSpeed.toFixed(2);
+        }
+
+        function updateBrushSize() {
+            params.brushSize = parseFloat(this.value);
+            material.uniforms.u_brushSize.value = params.brushSize;
+            document.getElementById('brush-size-value').textContent = params.brushSize.toFixed(2);
+        }
+
+        function setRule(rule) {
+            params.rule = rule;
+            if (rule === 'life') {
+                material.uniforms.u_rule.value = 0;
+            } else if (rule === 'highlife') {
+                material.uniforms.u_rule.value = 1;
+            } else if (rule === 'seeds') {
+                material.uniforms.u_rule.value = 2;
+            }
+        }
+
+        function randomPattern() {
+            const width = renderer.domElement.width;
+            const height = renderer.domElement.height;
+            const size = width * height * 4;
+            const data = new Float32Array(size);
+
+            for (let i = 0; i < size; i += 4) {
+                if (Math.random() < 0.3) {
+                    data[i] = Math.random();
+                    data[i+1] = Math.random();
+                    data[i+2] = Math.random();
+                    data[i+3] = 1.0;
+                } else {
+                    data[i] = 0.0;
+                    data[i+1] = 0.0;
+                    data[i+2] = 0.0;
+                    data[i+3] = 0.0;
+                }
+            }
+
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].texture.image.data = data;
+                renderTargets[i].texture.needsUpdate = true;
+            }
+        }
+
+        function gliderPattern() {
+            const width = renderer.domElement.width;
+            const height = renderer.domElement.height;
+            const size = width * height * 4;
+            const data = new Float32Array(size).fill(0);
+
+            // Center position
+            const cx = Math.floor(width / 2);
+            const cy = Math.floor(height / 2);
+
+            // Glider pattern
+            const glider = [
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 1, 1]
+            ];
+
+            for (let y = 0; y < 3; y++) {
+                for (let x = 0; x < 3; x++) {
+                    if (glider[y][x] === 1) {
+                        const px = cx + x - 1;
+                        const py = cy + y - 1;
+                        if (px >= 0 && px < width && py >= 0 && py < height) {
+                            const idx = (py * width + px) * 4;
+                            data[idx] = 0.8;
+                            data[idx+1] = 0.2;
+                            data[idx+2] = 0.5;
+                            data[idx+3] = 1.0;
+                        }
+                    }
+                }
+            }
+
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].texture.image.data = data;
+                renderTargets[i].texture.needsUpdate = true;
+            }
+        }
+
+        function pulsarPattern() {
+            const width = renderer.domElement.width;
+            const height = renderer.domElement.height;
+            const size = width * height * 4;
+            const data = new Float32Array(size).fill(0);
+
+            // Center position
+            const cx = Math.floor(width / 2);
+            const cy = Math.floor(height / 2);
+
+            // Pulsar pattern (simplified)
+            const pulsar = [
+                [0,0,1,1,1,0,0,0,1,1,1,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [0,0,1,1,1,0,0,0,1,1,1,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,1,1,1,0,0,0,1,1,1,0,0],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [1,0,0,0,0,1,0,1,0,0,0,0,1],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,1,1,1,0,0,0,1,1,1,0,0]
+            ];
+
+            for (let y = 0; y < 13; y++) {
+                for (let x = 0; x < 13; x++) {
+                    if (pulsar[y][x] === 1) {
+                        const px = cx + x - 6;
+                        const py = cy + y - 6;
+                        if (px >= 0 && px < width && py >= 0 && py < height) {
+                            const idx = (py * width + px) * 4;
+                            data[idx] = 0.2;
+                            data[idx+1] = 0.8;
+                            data[idx+2] = 0.5;
+                            data[idx+3] = 1.0;
+                        }
+                    }
+                }
+            }
+
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].texture.image.data = data;
+                renderTargets[i].texture.needsUpdate = true;
+            }
+        }
+
+        function clearPattern() {
+            const width = renderer.domElement.width;
+            const height = renderer.domElement.height;
+            const size = width * height * 4;
+            const data = new Float32Array(size).fill(0);
+
+            for (let i = 0; i < 2; i++) {
+                renderTargets[i].texture.image.data = data;
+                renderTargets[i].texture.needsUpdate = true;
+            }
+        }
+
+        function toggleUI() {
+            const ui = document.getElementById('ui-container');
+            ui.style.display = ui.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // Initialize the application
+        init();
+    </script>
+
+              
+          
+                
+          
+              
+</body></html>
